@@ -3,11 +3,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::error;
 
-pub struct AiSettings {
+pub struct AiSettings<'a> {
     pub endpoint: String,
     pub api_key: String,
     pub system_prompt: String,
     pub model: String,
+    pub extra_options: Option<&'a serde_json::Map<String, serde_json::Value>>,
 }
 
 #[derive(Serialize)]
@@ -39,7 +40,7 @@ struct MessageResponse {
 }
 
 pub async fn run_prompt(
-    ai_data: &AiSettings,
+    ai_data: &AiSettings<'_>,
     prompt: String,
 ) -> Result<String, Box<dyn std::error::Error>> {
     println!("Running Prompt:\n{}", prompt);
@@ -67,6 +68,22 @@ pub async fn run_prompt(
             },
         ],
     };
+
+    let request_body = {
+        match ai_data.extra_options {
+            Some(extra_opts) => {
+                let mut merged = serde_json::to_value(&request_body).unwrap();
+                let obj = merged.as_object_mut().unwrap();
+                for (k, v) in extra_opts {
+                    obj.insert(k.clone(), v.clone());
+                }
+                merged
+            }
+            None => serde_json::to_value(&request_body).unwrap(),
+        }
+    };
+
+    // println!("JSON:\n{}", request_body);
 
     // Send POST request
     let res = client

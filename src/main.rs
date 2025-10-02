@@ -1,5 +1,6 @@
 use clap::{Parser, command};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{env, fmt::Write, fs::File, io::Read};
 
 use crate::error::Error;
@@ -150,7 +151,7 @@ async fn translate_blender_lines(
     entries_per_query: usize,
     pre_context_lines: usize,
     pos_context_lines: usize,
-    ai_settings: &open_ai::AiSettings,
+    ai_settings: &open_ai::AiSettings<'_>,
     dst_language: &str,
 ) -> Result<Vec<BlenderTextRow>, Box<dyn std::error::Error>> {
     let mut output = Vec::new();
@@ -248,6 +249,10 @@ struct Args {
     /// If increasing this too much, consider raising batch-size instead.
     #[arg(long, default_value_t = 3)]
     pos_ctx: u16,
+
+    /// Path to JSON file to customize more options (like temperature, top_p, etc).
+    #[arg(long, short)]
+    llm_options: Option<String>,
 }
 
 #[tokio::main]
@@ -269,11 +274,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
     };
 
+    let extra_options: Option<Value> = match args.llm_options {
+        Some(llm_options_path) => {
+            let mut file = File::open(llm_options_path)?;
+            let mut json_str = String::new();
+            file.read_to_string(&mut json_str)?;
+            Some(serde_json::from_str(&json_str).unwrap())
+        }
+        None => None,
+    };
+
     let ai_settings = open_ai::AiSettings {
         endpoint: args.endpoint,
         api_key: api_key,
         system_prompt: system_prompt,
         model: args.model,
+        extra_options: match &extra_options {
+            Some(extra_options) => Some(extra_options.as_object().unwrap()),
+            None => None,
+        },
     };
 
     // Translate to target lang.
