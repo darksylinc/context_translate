@@ -53,6 +53,7 @@ Even though there are 4 lines total, this is two entries.
 You're offered the preceeding and the subsequent lines for context so you can translate better.
 
 Your output must be the same as the input, **context removed**.
+IT IS SUPER IMPORTANT THAT YOU PRESERVE THE EXACT SAME ORDER IN WHICH ENTRIES WERE PROVIDED. DO NOT UNDER ANY CIRCUMSTANCE ALTER THE ORDER.
 At the end of **EACH ENTRY** you *may* write your own remarks. You MUST place ONCE PER ENTRY the sequence `{RMK}` like this to indicate your Remarks start and is not part of the translated part:
 
 Example Good:

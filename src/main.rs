@@ -171,7 +171,7 @@ async fn translate_blender_lines(
 
         let prompt = generate_blender_prompt(pre_cxt, entries_to_translate, pos_cxt, dst_language);
 
-        let response = open_ai::run_prompt(ai_settings, prompt).await?;
+        let mut response = open_ai::run_prompt(ai_settings, &prompt).await?;
 
         let num_retries = 5;
 
@@ -183,7 +183,11 @@ async fn translate_blender_lines(
                     Ok(t) => translated_result = t,
                     Err(e) => {
                         if j + 1 == num_retries {
+                            eprintln!("Invalid Translation Output. Attempt {}. Giving up.", j);
                             return Err(Box::new(e));
+                        } else {
+                            eprintln!("Invalid Translation Output. Attempt {}. Retrying...", j);
+                            response = open_ai::run_prompt(ai_settings, &prompt).await?;
                         }
                     }
                 }
@@ -310,6 +314,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Now translate it back to the original lang for validation (if src_lang was provided).
     let original_back = match args.src_lang {
         Some(src_lang) => {
+            println!("Begin Back Translation");
             translate_blender_lines(
                 &translated,
                 args.batch_size as usize,

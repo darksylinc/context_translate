@@ -41,9 +41,9 @@ struct MessageResponse {
 
 pub async fn run_prompt(
     ai_data: &AiSettings<'_>,
-    prompt: String,
+    prompt: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    println!("Running Prompt:\n{}", prompt);
+    // println!("Running Prompt:\n{}", prompt);
 
     let client = reqwest::Client::new();
 
@@ -101,9 +101,9 @@ pub async fn run_prompt(
 
     // Parse response
     let mut chat_response: ChatResponse = res.json().await?;
-    for choice in &chat_response.choices {
+    /*for choice in &chat_response.choices {
         println!("AI Output:\n{}", choice.message.content);
-    }
+    }*/
 
     let response = {
         if !chat_response.choices.is_empty() {
