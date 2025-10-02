@@ -156,8 +156,9 @@ async fn translate_blender_lines(
 ) -> Result<Vec<BlenderTextRow>, Box<dyn std::error::Error>> {
     let mut output = Vec::new();
     output.reserve_exact(entries.len());
-    // let mut prompt: Vec<BlenderTextRow>;
+    let num_batches = (entries.len() + entries_per_query - 1) / entries_per_query;
     for i in (0..entries.len()).step_by(entries_per_query) {
+        println!("Batch ID {} / {}", i / entries_per_query, num_batches);
         let from = i;
         let to = std::cmp::min(i + entries_per_query, entries.len());
 
