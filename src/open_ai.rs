@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 
@@ -8,6 +10,7 @@ pub struct AiSettings<'a> {
     pub api_key: String,
     pub system_prompt: String,
     pub model: String,
+    pub timeout_secs: u64,
     pub extra_options: Option<&'a serde_json::Map<String, serde_json::Value>>,
 }
 
@@ -90,8 +93,15 @@ pub async fn run_prompt(
         .post(&ai_data.endpoint)
         .headers(headers)
         .json(&request_body)
-        .send()
-        .await?;
+        .send();
+
+    let res = match tokio::time::timeout(Duration::from_secs(ai_data.timeout_secs), res).await {
+        Ok(res) => res?,
+        Err(_) => {
+            eprintln!("AI took too long. Aborting.");
+            return Ok("".to_string());
+        }
+    };
 
     if !res.status().is_success() {
         let status_code = res.status();

@@ -1,7 +1,7 @@
 use clap::{Parser, command};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{env, fmt::Write, fs::File, io::Read};
+use std::{env, fmt::Write, fs::File, io::Read, io::Write as OtherWrite};
 
 use crate::error::Error;
 
@@ -94,6 +94,29 @@ fn generate_blender_prompt(
 fn process_ai_response(
     response: &String,
     entries: &[BlenderTextRow],
+    orig_prompt: &String,
+    error_log: &mut File,
+) -> Result<Vec<BlenderTextRow>, Error> {
+    let r = process_ai_response_impl(response, entries);
+    match &r {
+        Ok(_) => {}
+        Err(_) => {
+            writeln!(error_log, "# ERROR LOG Invalid response:").ok();
+            writeln!(error_log, "==============================").ok();
+            writeln!(error_log, "{}", response).ok();
+            writeln!(error_log, "==============================").ok();
+            writeln!(error_log, "# ERROR LOG Original Prompt:").ok();
+            writeln!(error_log, "==============================").ok();
+            writeln!(error_log, "{}", orig_prompt).ok();
+            writeln!(error_log, "==============================").ok();
+        }
+    }
+    r
+}
+
+fn process_ai_response_impl(
+    response: &String,
+    entries: &[BlenderTextRow],
 ) -> Result<Vec<BlenderTextRow>, Error> {
     if response.is_empty() {
         return Err(error::Error::InvalidTranslation);
@@ -129,7 +152,7 @@ fn process_ai_response(
             .split_once("{RMK}")
             .unwrap_or((&response[start_idx..end_idx], ""));
         let text = parts.0.trim_start().trim_end();
-        let remarks = parts.1;
+        let remarks = parts.1.trim_start().trim_end();
 
         translated.push(BlenderTextRow {
             datablock_name: entry.datablock_name.clone(),
@@ -153,6 +176,7 @@ async fn translate_blender_lines(
     pos_context_lines: usize,
     ai_settings: &open_ai::AiSettings<'_>,
     dst_language: &str,
+    error_log: &mut File,
 ) -> Result<Vec<BlenderTextRow>, Box<dyn std::error::Error>> {
     let mut output = Vec::new();
     output.reserve_exact(entries.len());
@@ -174,18 +198,28 @@ async fn translate_blender_lines(
 
         let mut response = open_ai::run_prompt(ai_settings, &prompt).await?;
 
-        let num_retries = 5;
+        let num_retries = 9;
 
         let mut translated = {
             let mut translated_result = Vec::new();
             for j in 0..num_retries {
-                let translated = process_ai_response(&response, entries_to_translate);
+                let translated =
+                    process_ai_response(&response, entries_to_translate, &prompt, error_log);
                 match translated {
                     Ok(t) => translated_result = t,
-                    Err(e) => {
+                    Err(_) => {
                         if j + 1 == num_retries {
                             eprintln!("Invalid Translation Output. Attempt {}. Giving up.", j);
-                            return Err(Box::new(e));
+                            for entry in entries_to_translate {
+                                translated_result.push(BlenderTextRow {
+                                    datablock_name: entry.datablock_name.clone(),
+                                    speaker: entry.speaker.clone(),
+                                    text: "".to_string(),
+                                    original: Some(entry.text.clone()),
+                                    original_back: None,
+                                    remarks: Some("AI ERROR. GIVEN UP.".to_string()),
+                                });
+                            }
                         } else {
                             eprintln!("Invalid Translation Output. Attempt {}. Retrying...", j);
                             response = open_ai::run_prompt(ai_settings, &prompt).await?;
@@ -258,11 +292,17 @@ struct Args {
     /// Path to JSON file to customize more options (like temperature, top_p, etc).
     #[arg(long, short)]
     llm_options: Option<String>,
+
+    /// Timeout in seconds for each batch before considering it an AI error.
+    #[arg(long)]
+    timeout_secs: u64,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
+
+    let mut error_log = File::create("errors.log")?;
 
     println!("Opening file {}", args.src_csv);
     let lines = read_csv(&args.src_csv)?;
@@ -294,6 +334,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         api_key: api_key,
         system_prompt: system_prompt,
         model: args.model,
+        timeout_secs: args.timeout_secs,
         extra_options: match &extra_options {
             Some(extra_options) => Some(extra_options.as_object().unwrap()),
             None => None,
@@ -309,6 +350,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.pos_ctx as usize,
         &ai_settings,
         &args.dst_lang,
+        &mut error_log,
     )
     .await?;
 
@@ -316,15 +358,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let original_back = match args.src_lang {
         Some(src_lang) => {
             println!("Begin Back Translation");
-            translate_blender_lines(
+            match translate_blender_lines(
                 &translated,
                 args.batch_size as usize,
                 args.pre_ctx as usize,
                 args.pos_ctx as usize,
                 &ai_settings,
                 &src_lang,
+                &mut error_log,
             )
-            .await?
+            .await
+            {
+                Ok(r) => r,
+                Err(_) => {
+                    eprintln!("Back Translation Error. It won't be available.");
+                    let mut blank = Vec::new();
+                    blank.resize_with(translated.len(), || BlenderTextRow::default());
+                    blank
+                }
+            }
         }
         None => {
             let mut blank = Vec::new();
