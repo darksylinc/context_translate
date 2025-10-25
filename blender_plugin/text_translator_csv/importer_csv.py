@@ -18,8 +18,8 @@ class OBJECT_OT_import_text_objects_csv(bpy.types.Operator):
     )
 
     def execute(self, context):
-        # Ensure "Japanese" collection exists
-        coll_name = "Japanese"
+        # Ensure "Japanese Text" collection exists
+        coll_name = "Japanese Text"
         if coll_name in bpy.data.collections:
             jp_collection = bpy.data.collections[coll_name]
         else:
@@ -44,6 +44,7 @@ class OBJECT_OT_import_text_objects_csv(bpy.types.Operator):
                 new_obj = obj.copy()
                 new_obj.data = obj.data.copy()
 
+                """
                 # Duplicate animation data (if any)
                 if obj.animation_data:
                     new_obj.animation_data_create()
@@ -70,10 +71,14 @@ class OBJECT_OT_import_text_objects_csv(bpy.types.Operator):
                                 setattr(new_con, attr, getattr(con, attr))
                             except Exception:
                                 pass
+                """
 
                 # Rename object and datablock
                 new_obj.name = datablock_name + "_jp"
                 new_obj.data.name = obj.data.name + "_jp"
+
+                new_obj.data.resolution_u = 12
+                new_obj.data.font = bpy.data.fonts["Bfont Regular"]
 
                 # Set translated text
                 new_obj.data.body = new_text
