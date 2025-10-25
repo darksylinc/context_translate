@@ -1,5 +1,5 @@
 [package]
-name = "ods_ai_translator"
+name = "context_translate"
 version = "0.1.0"
 edition = "2024"
 
