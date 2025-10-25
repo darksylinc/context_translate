@@ -91,6 +91,10 @@ And then run this tool:
 >
 > Run `context_translate --help` for a full description of [all parameters](https://github.com/darksylinc/context_translate/blob/d5b9e63e48dc0f951d95b9c7036e936edb7b54da/src/main.rs#L243C1-L298C23).
 
+> [!TIP]
+>
+> Use `OPENAI_API_KEY` environment variable to avoid passing the secret API key through the CLI arguments.
+
 The most important parameters are the 3 last ones and the timeout:
 
 1. `--pre-ctx <n>` how many lines *previous* lines to give as context, per batch.
