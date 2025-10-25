@@ -87,6 +87,10 @@ And then run this tool:
 	--pos-ctx 2
 ```
 
+> [!TIP]
+>
+> Run `context_translate --help` for a full description of [all parameters](https://github.com/darksylinc/context_translate/blob/d5b9e63e48dc0f951d95b9c7036e936edb7b54da/src/main.rs#L243C1-L298C23).
+
 The most important parameters are the 3 last ones and the timeout:
 
 1. `--pre-ctx <n>` how many lines *previous* lines to give as context, per batch.
@@ -101,7 +105,7 @@ For example if using:
 	--pos-ctx 1
 ```
 
-the input lines are:
+and the input lines are:
 
 | Speaker | Text                         |
 |---------|------------------------------|
@@ -132,8 +136,7 @@ And then finally:
 
 | Speaker | Text                         |                  |
 |---------|------------------------------|------------------|
-| John    | Fine, how are you?           | As pre context   |
-| Anna    | So so, I’ve had better days. | Being translated |
+| Anna    | So so, I’ve had better days. | As pre context   |
 | John    | Oh really? What's wrong?     | Being translated |
 
 There are no ideal settings. You may also find that multiple runs with different settings produce different results:
@@ -152,6 +155,19 @@ Then pick the best-translated lines.
 I don't know. But we use the OpenAI API endpoints so in theory it should work.
 
 Just point `--endpoint https://api.openai.com/v1/chat/completions` and set the proper API KEY. We are not responsible if hit rate limits or burns your credits.
+
+## Does it have "technical" errors?
+
+Yes, the AI may not always follow the instructions and produce invalid output. We will notice this and retry several times.
+If errors continues, it gives up and continues to the next batch. **That batch will be outputted untranslated**.
+
+## Does it make translation errors?
+
+Yes. But it's far better than using Google Translate or other tools.
+
+The temperature setting also plays a big role for certain translations that require a lot of contextual information, as the AI has more leeway to dwell into alternative meanings.
+
+The system prompt also plays a huge rule to ensure the translation is accurate.
 
 # Customizing the System Prompt
 
