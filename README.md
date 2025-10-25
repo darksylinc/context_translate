@@ -158,7 +158,7 @@ Then pick the best-translated lines.
 
 I don't know. But we use the OpenAI API endpoints so in theory it should work.
 
-Just point `--endpoint https://api.openai.com/v1/chat/completions` and set the proper API KEY. We are not responsible if hit rate limits or burns your credits.
+Just point `--endpoint https://api.openai.com/v1/chat/completions` and set the proper API KEY. We are not responsible if you hit rate limits or it burns your credits.
 
 ## Does it have "technical" errors?
 
