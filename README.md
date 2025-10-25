@@ -173,6 +173,10 @@ The temperature setting also plays a big role for certain translations that requ
 
 The system prompt also plays a huge rule to ensure the translation is accurate.
 
+## Is this tool vulnerable to prompt injection?
+
+Yes. Only use it against trusted inputs. This tool is meant for teams translating their own projects' lines. If you expose it to the public, you're on your own.
+
 # Customizing the System Prompt
 
 The [system_prompt.txt](examples/manga/system_prompt.txt) we include as example can be customized.
@@ -197,4 +201,10 @@ Once translated, use `File` -> `Import` -> `Import Text Objects to CSV` to dupli
 
 # License
 
-Under GNU GENERAL PUBLIC LICENSE (GPL) 3.0. See [LICENSE](./LICENSE). 
+Under GNU GENERAL PUBLIC LICENSE (GPL) 3.0. See [LICENSE](./LICENSE).
+
+# Disclaimer
+
+This software is provided "as is," without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose, and non-infringement. In no event shall the authors or copyright holders be liable for any claim, damages, or other liability, whether in an action of contract, tort, or otherwise, arising from, out of, or in connection with the software or the use or other dealings in the software.
+
+WE ARE NOT RESPONSIBLE FOR ANYTHING THAT HAPPENS DUE TO THE USE OF THIS TOOL, WHETHER IT'S DAMAGE, LOSS OF PROFIT, OR ANY OTHER KIND.
