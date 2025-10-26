@@ -1,7 +1,7 @@
 context_translate is a versatile, open-source command-line interface (CLI) tool designed to streamline the translation process for dialogue, subtitles, and other text-based content. By leveraging advanced AI models, context_translate provides context-aware localizations, ensuring accurate and natural-sounding translations, especially for languages with unique structures like Japanese.
 
 > [!WARNING]
-> context_translate is in early alpha stage. We are not providing binaries out of the box yet.
+> context_translate is in early alpha stage.
 
 # What does it do?
 
@@ -156,14 +156,14 @@ Then pick the best-translated lines.
 
 ## Does it work with ChatGPT?
 
-I don't know. But we use the OpenAI API endpoints so in theory it should work.
+I don't know, I never tried. But we use the OpenAI API endpoints so in theory it should work.
 
 Just point `--endpoint https://api.openai.com/v1/chat/completions` and set the proper API KEY. We are not responsible if you hit rate limits or it burns your credits.
 
 ## Does it have "technical" errors?
 
 Yes, the AI may not always follow the instructions and produce invalid output. We will notice this and retry several times.
-If errors continues, it gives up and continues to the next batch. **That batch will be outputted untranslated**.
+If errors continue, it gives up and continues to the next batch. **That batch will be outputted untranslated**.
 
 ## Does it make translation errors?
 
@@ -176,6 +176,14 @@ The system prompt also plays a huge rule to ensure the translation is accurate.
 ## Is this tool vulnerable to prompt injection?
 
 Yes. Only use it against trusted inputs. This tool is meant for teams translating their own projects' lines. If you expose it to the public, you're on your own.
+
+To elaborate, this tool is written in Rust and merely reads your CSV input, sends it to AI, parses the output, and writes a CSV file. The biggest "danger" I can think of is running out of memory due to a malicious prompt causing AI to return an extremely large output (which would probably cause the AI to run out of context window before the tool runs out of memory), thus causing DoS.
+
+Another risk is that prompt injection could force the AI to always produce invalid output, causing us to always retry and fail. This would lead to higher resource usage which translates to higher costs and possibly a DoS.
+
+The tool does not analyze the lines' contents. If the AI has execution capabilities, it will run whatever the prompt tells it to do.
+
+But the risks of compromising the tool itself should be minimimal due to the inherent memory safety of Rust and the simplicity of the tool.
 
 # Customizing the System Prompt
 
