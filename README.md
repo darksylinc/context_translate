@@ -223,6 +223,11 @@ Does NOT mean the same as:
 
 **And the AI will translate them very differently**. In the first example, Cecilia answering first implies she did not like the movie. In the second example, Cecilia is countering she did not fall asleep. **Context matters**.
 
+Here's the video showing the plugin in action:
+
+https://github.com/user-attachments/assets/3131cad6-c56f-43c6-bd80-f636642f2d54
+
+
 # License
 
 Under GNU GENERAL PUBLIC LICENSE (GPL) 3.0. See [LICENSE](./LICENSE).
