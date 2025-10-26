@@ -207,6 +207,22 @@ All visible text objects will be exported to CSV. The Collection the text object
 
 Once translated, use `File` -> `Import` -> `Import Text Objects to CSV` to duplicate each text object with its translated counterpart. They will be added together to a single new Collection.
 
+The tool has been optimized for 2D Canvas flow, in which +Z is up and -Z is down. It is also been tweaked for Japanese Manga in which left-most text comes before right-most text. Though this should be easy to make tweakable in the future.
+
+**The order of lines is important**, because:
+
+1. Hi! Did you enjoy the movie yesterday?
+2. No, I did not!
+3. Yes! I loved it! But I think Cecilia fell asleep.
+
+Does NOT mean the same as:
+
+1. Hi! Did you enjoy the movie yesterday?
+2. Yes! I loved it! But I think Cecilia fell asleep.
+3. No, I did not!
+
+**And the AI will translate them very differently**. In the first example, Cecilia answering first implies she did not like the movie. In the second example, Cecilia is countering she did not fall asleep. **Context matters**.
+
 # License
 
 Under GNU GENERAL PUBLIC LICENSE (GPL) 3.0. See [LICENSE](./LICENSE).
