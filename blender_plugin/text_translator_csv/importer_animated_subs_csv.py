@@ -84,6 +84,10 @@ class OBJECT_OT_import_animated_subs_text_objects_csv(bpy.types.Operator):
                 speaker = row["Speaker"]
                 use_italics = row['S'].find('I') != -1
 
+                if len(speaker) == 0:
+                    # This line is just a comment. Skip it.
+                    continue
+
                 obj_name = "Sub." + speaker + "." + str(uid)
 
                 obj = bpy.data.objects.get(obj_name)
@@ -126,6 +130,12 @@ class OBJECT_OT_import_animated_subs_text_objects_csv(bpy.types.Operator):
                 obj.data.size = 0.056412
                 obj.data.align_x = 'CENTER'
                 obj.data.align_y = 'CENTER'
+
+                obj.visible_diffuse = False
+                obj.visible_glossy = False
+                obj.visible_shadow = False
+                obj.visible_transmission = False
+                obj.visible_volume_scatter = False
 
                 obj.location = camera.location
                 obj.parent = camera
