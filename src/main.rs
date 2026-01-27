@@ -6,6 +6,7 @@ use std::{env, fmt::Write, fs::File, io::Read, io::Write as OtherWrite};
 use crate::error::Error;
 
 mod error;
+mod ods_reader;
 mod open_ai;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -122,8 +123,11 @@ fn process_ai_response_impl(
         return Err(error::Error::InvalidTranslation);
     }
 
-    let mut translated = Vec::new();
-    translated.reserve_exact(entries.len());
+    // We can't use response.len() - 1 for out-of-bounds check because that may not be a char boundary.
+    // Find the last character.
+    let last_char_start = response.char_indices().last().unwrap_or((0, 'A')).0;
+
+    let mut translated = Vec::with_capacity(entries.len());
 
     let mut start_idx = 0;
     for entry in entries {
@@ -138,7 +142,7 @@ fn process_ai_response_impl(
             .ok_or(error::Error::InvalidTranslation)?;
         start_idx = std::cmp::min(
             start_idx + haystack + speaker_pattern.len() + 1,
-            response.len() - 1,
+            last_char_start,
         );
         let end_idx = match response[start_idx..].find("{SPK}") {
             Some(idx) => start_idx + idx,
@@ -239,63 +243,69 @@ async fn translate_blender_lines(
 /// Send CSV file to AI for translating.
 #[derive(clap::Parser, Debug)]
 #[command(version, about, long_about = None)]
-struct Args {
+pub struct Args {
     /// Source Language. Can be left blank to auto-detect BUT "translation back" won't be available.
     /// "translation back" is very helpful for diagnosing if the translated text retained its original meaning.
     /// Highly recommended.
     #[arg(short, long)]
-    src_lang: Option<String>,
+    pub src_lang: Option<String>,
     /// Destination Language to translate to.
     #[arg(short, long)]
-    dst_lang: String,
+    pub dst_lang: String,
     /// OpenAI API key. You can also set the OPENAI_API_KEY environment variable. Cmd line is higher priority.
     #[arg(short, long)]
-    api_key: Option<String>,
+    pub api_key: Option<String>,
     /// LLM Model to use. e.g. "mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf"
     #[arg(short, long)]
-    model: String,
+    pub model: String,
 
     /// Path to the system prompt location.
     #[arg(long)]
-    system_prompt: String,
+    pub system_prompt: String,
 
     /// URI to API endpoint, for example https://api.openai.com/v1/chat/completions or
     /// http://127.0.0.1:8081/v1/chat/completions
     #[arg(short, long)]
-    endpoint: String,
+    pub endpoint: String,
 
     /// CSV file to translate.
     #[arg(long)]
-    src_csv: String,
+    pub src_csv: String,
     /// Output CSV file.
     #[arg(long)]
-    dst_csv: String,
+    pub dst_csv: String,
 
     /// How many lines to translate per AI prompt. Higher values translate faster,
     /// but has a higher chance of being inaccurate or hallucinating.
     /// Extremely high values may cause performance issues due to LLM context window handling.
     #[arg(short, long, default_value_t = 6, value_parser = clap::value_parser!(u16).range(1..))]
-    batch_size: u16,
+    pub batch_size: u16,
 
     /// How many preceeding lines to send alongside the batch as context.
     /// Very low values may result in less accurate translations.
     /// If increasing this too much, consider raising batch-size instead.
     #[arg(long, default_value_t = 3)]
-    pre_ctx: u16,
+    pub pre_ctx: u16,
 
     /// How many subsequent lines to send alongside the batch as context.
     /// Very low values may result in less accurate translations.
     /// If increasing this too much, consider raising batch-size instead.
     #[arg(long, default_value_t = 3)]
-    pos_ctx: u16,
+    pub pos_ctx: u16,
 
     /// Path to JSON file to customize more options (like temperature, top_p, etc).
     #[arg(long, short)]
-    llm_options: Option<String>,
+    pub llm_options: Option<String>,
 
     /// Timeout in seconds for each batch before considering it an AI error.
     #[arg(long)]
-    timeout_secs: u64,
+    pub timeout_secs: u64,
+
+    /// When present, it puts tool into "key / value" mode and open an ODS spreadsheet.
+    /// Submit a comma-separated 0-based integers for which columns contain.
+    /// The first column is the source language, the other columns add additional context.
+    #[arg(long, default_value = "")]
+    pub ods_key_mode_columns: String,
 }
 
 #[tokio::main]
@@ -304,23 +314,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut error_log = File::create("errors.log")?;
 
-    println!("Opening file {}", args.src_csv);
-    let lines = read_csv(&args.src_csv)?;
-
     println!("Opening System Prompt {}", args.system_prompt);
     let mut system_prompt = String::new();
-    File::open(args.system_prompt)?.read_to_string(&mut system_prompt)?;
+    File::open(&args.system_prompt)?.read_to_string(&mut system_prompt)?;
 
     // Read API key from environment variable
     let api_key = match args.api_key {
-        Some(s) => s,
+        Some(ref s) => s.to_string(),
         None => env::var("OPENAI_API_KEY").expect(
             "Please set the OPENAI_API_KEY environment variable or via command line argument. try '--help'",
         ),
     };
 
     let extra_options: Option<Value> = match args.llm_options {
-        Some(llm_options_path) => {
+        Some(ref llm_options_path) => {
             let mut file = File::open(llm_options_path)?;
             let mut json_str = String::new();
             file.read_to_string(&mut json_str)?;
@@ -330,10 +337,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let ai_settings = open_ai::AiSettings {
-        endpoint: args.endpoint,
+        endpoint: args.endpoint.clone(),
         api_key: api_key,
         system_prompt: system_prompt,
-        model: args.model,
+        model: args.model.clone(),
         timeout_secs: args.timeout_secs,
         extra_options: match &extra_options {
             Some(extra_options) => Some(extra_options.as_object().unwrap()),
@@ -341,52 +348,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     };
 
-    // Translate to target lang.
-    println!("Begin Translation");
-    let translated = translate_blender_lines(
-        &lines,
-        args.batch_size as usize,
-        args.pre_ctx as usize,
-        args.pos_ctx as usize,
-        &ai_settings,
-        &args.dst_lang,
-        &mut error_log,
-    )
-    .await?;
+    if !args.ods_key_mode_columns.is_empty() {
+        ods_reader::translate_key_mode_ods(&args, &mut error_log, &ai_settings).await?;
+    } else {
+        println!("Opening file {}", args.src_csv);
+        let lines = read_csv(&args.src_csv)?;
 
-    // Now translate it back to the original lang for validation (if src_lang was provided).
-    let original_back = match args.src_lang {
-        Some(src_lang) => {
-            println!("Begin Back Translation");
-            match translate_blender_lines(
-                &translated,
-                args.batch_size as usize,
-                args.pre_ctx as usize,
-                args.pos_ctx as usize,
-                &ai_settings,
-                &src_lang,
-                &mut error_log,
-            )
-            .await
-            {
-                Ok(r) => r,
-                Err(_) => {
-                    eprintln!("Back Translation Error. It won't be available.");
-                    let mut blank = Vec::new();
-                    blank.resize_with(translated.len(), || BlenderTextRow::default());
-                    blank
+        // Translate to target lang.
+        println!("Begin Translation");
+        let translated = translate_blender_lines(
+            &lines,
+            args.batch_size as usize,
+            args.pre_ctx as usize,
+            args.pos_ctx as usize,
+            &ai_settings,
+            &args.dst_lang,
+            &mut error_log,
+        )
+        .await?;
+
+        // Now translate it back to the original lang for validation (if src_lang was provided).
+        let original_back = match args.src_lang {
+            Some(src_lang) => {
+                println!("Begin Back Translation");
+                match translate_blender_lines(
+                    &translated,
+                    args.batch_size as usize,
+                    args.pre_ctx as usize,
+                    args.pos_ctx as usize,
+                    &ai_settings,
+                    &src_lang,
+                    &mut error_log,
+                )
+                .await
+                {
+                    Ok(r) => r,
+                    Err(_) => {
+                        eprintln!("Back Translation Error. It won't be available.");
+                        let mut blank = Vec::new();
+                        blank.resize_with(translated.len(), || BlenderTextRow::default());
+                        blank
+                    }
                 }
             }
-        }
-        None => {
-            let mut blank = Vec::new();
-            blank.resize_with(translated.len(), || BlenderTextRow::default());
-            blank
-        }
-    };
+            None => {
+                let mut blank = Vec::new();
+                blank.resize_with(translated.len(), || BlenderTextRow::default());
+                blank
+            }
+        };
 
-    println!("Writing results to {}", args.dst_csv);
-    write_csv(&args.dst_csv, translated, original_back)?;
+        println!("Writing results to {}", args.dst_csv);
+        write_csv(&args.dst_csv, translated, original_back)?;
+    }
 
     Ok(())
 }
