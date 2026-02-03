@@ -262,7 +262,7 @@ pub async fn translate_key_mode_ods(
         .collect();
 
     // Process main translations.
-    let lang_sets = load_ods("Translations.ods", &columns_to_use);
+    let lang_sets = load_ods(&args.src_csv, &columns_to_use);
 
     if lang_sets.is_empty() {
         panic!("No languages found in ODS file?!");
