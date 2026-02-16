@@ -156,17 +156,17 @@ async fn translate_lang_set(
         let entries_to_translate = &src_lang.entries[from..to];
 
         for (j, e) in entries_to_translate.iter().enumerate() {
-            prompt += &format!("\n# {}\n{}", e.key_name, e.text);
+            prompt += &format!("\n\n# {}\n{}", e.key_name, e.text);
 
             if !context.is_empty() {
                 let mut had_context = false;
                 let old_len = prompt.len();
-                prompt += "\n## Additional Context";
+                prompt += "\n\n## Additional Context";
 
                 for c in context {
                     let ce = &c.entries[from + j];
                     if !ce.text.is_empty() {
-                        prompt += &format!("\n### {}\n{}", c.lang, ce.text);
+                        prompt += &format!("\n\n### {}\n{}", c.lang, ce.text);
                         had_context = true;
                     }
                 }
