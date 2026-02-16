@@ -12,6 +12,7 @@ pub struct AiSettings<'a> {
     pub model: String,
     pub timeout_secs: u64,
     pub extra_options: Option<&'a serde_json::Map<String, serde_json::Value>>,
+    pub debug: bool,
 }
 
 #[derive(Serialize)]
@@ -47,6 +48,14 @@ pub async fn run_prompt(
     prompt: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
     // println!("Running Prompt:\n{}", prompt);
+
+    if ai_data.debug {
+        println!(
+            "==============\nSYSTEM PROMPT\n==============\n{}",
+            &ai_data.system_prompt
+        );
+        println!("==============\nNORMAL PROMPT\n==============\n{}", prompt);
+    }
 
     let client = reqwest::Client::new();
 
@@ -124,6 +133,13 @@ pub async fn run_prompt(
             String::new()
         }
     };
+
+    if ai_data.debug {
+        println!(
+            "==============\nSYSTEM PROMPT\n==============\n{}",
+            response
+        );
+    }
 
     Ok(response)
 }

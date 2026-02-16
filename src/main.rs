@@ -306,6 +306,10 @@ pub struct Args {
     /// The first column is the source language, the other columns add additional context.
     #[arg(long, default_value = "")]
     pub ods_key_mode_columns: String,
+
+    /// Show prompt in stdio.
+    #[arg(long)]
+    pub debug: bool,
 }
 
 #[tokio::main]
@@ -346,6 +350,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(extra_options) => Some(extra_options.as_object().unwrap()),
             None => None,
         },
+        debug: args.debug,
     };
 
     if !args.ods_key_mode_columns.is_empty() {
