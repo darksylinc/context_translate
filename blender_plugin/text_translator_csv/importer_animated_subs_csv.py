@@ -109,7 +109,7 @@ class OBJECT_OT_import_animated_subs_text_objects_csv(bpy.types.Operator):
                         obj.modifiers.new(name='GeometryNodes', type='NODES')
                         new_mod = obj.modifiers[-1]
                         new_mod.node_group = outline_geomnode
-                        new_mod['Socket_2'] = 0.002
+                        new_mod['Socket_2'] = 0.004
                         new_mod['Socket_3'] = 1.005
                         new_mod['Socket_4'] = 1.005
                         new_mod['Socket_5'] = bg_material
