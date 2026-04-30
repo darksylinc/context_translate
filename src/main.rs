@@ -9,7 +9,7 @@ mod error;
 mod ods_reader;
 mod open_ai;
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
 struct BlenderTextRow {
     datablock_name: String,
     #[serde(rename = "Collection")]
@@ -141,7 +141,7 @@ fn process_ai_response_impl(
             .find(&speaker_pattern)
             .ok_or(error::Error::InvalidTranslation)?;
         start_idx = std::cmp::min(
-            start_idx + haystack + speaker_pattern.len() + 1,
+            start_idx + haystack + speaker_pattern.len(),
             last_char_start,
         );
         let end_idx = match response[start_idx..].find("{SPK}") {
@@ -375,6 +375,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Now translate it back to the original lang for validation (if src_lang was provided).
         let original_back = match args.src_lang {
             Some(src_lang) => {
+                {
+                    println!("Writing intermediate results to {}", args.dst_csv);
+                    let mut blank = Vec::new();
+                    blank.resize_with(translated.len(), || BlenderTextRow::default());
+                    write_csv(&args.dst_csv, translated.clone(), blank)?;
+                }
                 println!("Begin Back Translation");
                 match translate_blender_lines(
                     &translated,
