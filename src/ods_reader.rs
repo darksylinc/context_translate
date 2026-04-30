@@ -33,21 +33,35 @@ fn load_ods(path: &str, columns_to_use: &Vec<u32>) -> Vec<LangSet> {
             entries: Vec::with_capacity((num_rows - 1) as usize),
         };
 
+        if col == 0 {
+            println!("Loading {} rows", num_rows);
+        }
+
         for row in 1..num_rows {
             let key = all.value(row, 0).as_str_or_default();
 
-            let value = all.value(row, col).as_cow_str_or("");
-            if !value.is_empty() && value != "#N/A" {
-                lang_set.entries.push(Entry {
-                    key_name: key.to_string(),
-                    text: value.to_string(),
-                });
+            if key.is_empty() {
+                if col == 0 {
+                    println!("Skipping empty row {}", row);
+                }
             } else {
-                lang_set.entries.push(Entry {
-                    key_name: key.to_string(),
-                    text: String::new(),
-                });
+                let value = all.value(row, col).as_cow_str_or("");
+                if !value.is_empty() && value != "#N/A" {
+                    lang_set.entries.push(Entry {
+                        key_name: key.to_string(),
+                        text: value.to_string(),
+                    });
+                } else {
+                    lang_set.entries.push(Entry {
+                        key_name: key.to_string(),
+                        text: String::new(),
+                    });
+                }
             }
+        }
+
+        if col == 0 {
+            println!("Loaded {} rows", lang_set.entries.len());
         }
 
         retval.push(lang_set);
