@@ -46,11 +46,18 @@ struct LineItem {
 /// A line to be translated. Carries an `index` which the LLM must echo back
 /// in its response, so entries can be matched deterministically regardless of
 /// the order the LLM returns them in.
+///
+/// On revision passes (multipass), `previous_translation` / `previous_remarks`
+/// carry the earlier attempt so the LLM can critique and improve it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct IndexedLineItem {
     index: usize,
     speaker: String,
     text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previous_translation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previous_remarks: Option<String>,
 }
 
 /// LLM input: M lines of previous context, N lines to translate, O lines of
@@ -121,11 +128,18 @@ fn write_csv(
     Ok(())
 }
 
+/// Builds the JSON `TranslationRequest` sent to the LLM: M lines of previous
+/// context, N lines to translate, O lines of future context.
+///
+/// `previous` (multipass only) carries the previous pass's results aligned
+/// with `to_translate`; when present, each entry is annotated with
+/// `previous_translation` / `previous_remarks` so the LLM can revise it.
 fn build_translation_request(
     pre_cxt: &[BlenderTextRow],
     to_translate: &[BlenderTextRow],
     pos_cxt: &[BlenderTextRow],
     dst_language: &str,
+    previous: Option<&[BlenderTextRow]>,
 ) -> Result<String, serde_json::Error> {
     let request = TranslationRequest {
         destination_language: dst_language,
@@ -139,10 +153,19 @@ fn build_translation_request(
         text_to_translate: to_translate
             .iter()
             .enumerate()
-            .map(|(i, l)| IndexedLineItem {
-                index: i,
-                speaker: l.speaker.clone(),
-                text: l.text.clone(),
+            .map(|(i, l)| {
+                let prev = previous.and_then(|p| p.get(i));
+                IndexedLineItem {
+                    index: i,
+                    speaker: l.speaker.clone(),
+                    text: l.text.clone(),
+                    previous_translation: prev
+                        .map(|r| r.text.clone())
+                        .filter(|t| !t.is_empty()),
+                    previous_remarks: prev
+                        .map(|r| r.remarks.clone().unwrap_or_default())
+                        .filter(|t| !t.is_empty()),
+                }
             })
             .collect(),
         future_context: pos_cxt
@@ -287,9 +310,9 @@ fn process_ai_response_impl(
 /// Translate a single batch (N lines) surrounded by context (M pre / O post lines).
 ///
 /// This is the pure unit of work: it builds the JSON request, calls the LLM,
-/// and parses/validates the JSON response. Multipass architectures can reuse
-/// this directly by rebuilding requests with different context or parameters
-/// for entries flagged `needs_revision`.
+/// and parses/validates the JSON response. Multipass revision passes reuse
+/// this directly by rebuilding requests with wider context and the previous
+/// pass's results (`previous`) for entries flagged `needs_revision`.
 async fn translate_batch(
     pre_cxt: &[BlenderTextRow],
     batch: &[BlenderTextRow],
@@ -297,8 +320,9 @@ async fn translate_batch(
     ai_settings: &open_ai::AiSettings<'_>,
     dst_language: &str,
     error_log: &mut File,
+    previous: Option<&[BlenderTextRow]>,
 ) -> Vec<BlenderTextRow> {
-    let request = build_translation_request(pre_cxt, batch, pos_cxt, dst_language)
+    let request = build_translation_request(pre_cxt, batch, pos_cxt, dst_language, previous)
         .expect("serializing our own TranslationRequest cannot fail");
 
     let num_retries = 3;
@@ -376,18 +400,108 @@ async fn translate_blender_lines(
             ai_settings,
             dst_language,
             error_log,
+            None,
         )
         .await;
 
         output.extend(translated);
     }
 
-    // TODO(multipass): rows carrying needs_revision == true can be collected
-    // here and re-sent through translate_batch with wider context (larger
-    // pre/pos context, lower temperature, or a dedicated revision system
-    // prompt), then merged back by datablock_name.
+    // Multipass: rows flagged needs_revision (or below --confidence-threshold)
+    // are re-translated by revision_pass() in run(), with progressively wider
+    // context and the previous attempt attached to the request.
 
     Ok(output)
+}
+
+/// True when a row should be re-translated on the next revision pass:
+/// the LLM flagged it `needs_revision`, or its confidence is below the
+/// user-supplied threshold.
+fn is_flagged(row: &BlenderTextRow, confidence_threshold: Option<f64>) -> bool {
+    row.needs_revision == Some(true)
+        || matches!(
+            (row.confidence, confidence_threshold),
+            (Some(c), Some(t)) if c < t
+        )
+}
+
+/// One revision pass: re-translate every row in `translated` that
+/// `is_flagged`, using context from the ORIGINAL source rows (the true
+/// dialogue neighbors, not possibly-wrong pass-1 translations) and attaching
+/// the previous attempt via `previous_translation` / `previous_remarks`.
+///
+/// Each flagged row is sent as its own single-entry batch (N=1) so the full
+/// widened context window goes to context. Results are merged back in place;
+/// identity fields (datablock_name, speaker, original) are preserved.
+///
+/// Returns the number of rows re-translated (0 when nothing was flagged —
+/// the caller stops the multipass loop then).
+async fn revision_pass(
+    translated: &mut Vec<BlenderTextRow>,
+    source: &[BlenderTextRow],
+    base_pre_ctx: usize,
+    base_pos_ctx: usize,
+    ctx_step: usize,
+    pass_number: usize,
+    confidence_threshold: Option<f64>,
+    ai_settings: &open_ai::AiSettings<'_>,
+    dst_language: &str,
+    error_log: &mut File,
+) -> usize {
+    let flagged: Vec<usize> = translated
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| is_flagged(r, confidence_threshold))
+        .map(|(i, _)| i)
+        .collect();
+
+    if flagged.is_empty() {
+        return 0;
+    }
+    let count = flagged.len();
+
+    let pre_ctx = base_pre_ctx + (pass_number - 1) * ctx_step;
+    let pos_ctx = base_pos_ctx + (pass_number - 1) * ctx_step;
+
+    println!(
+        "Pass {}: re-translating {} flagged row(s) with {} pre / {} post context",
+        pass_number,
+        flagged.len(),
+        pre_ctx,
+        pos_ctx
+    );
+
+    for i in flagged {
+        let pre_cxt = &source[i.saturating_sub(pre_ctx)..i];
+        let pos_cxt = &source[i + 1..std::cmp::min(i + 1 + pos_ctx, source.len())];
+        let batch = &source[i..i + 1];
+        let previous = &translated[i..i + 1];
+
+        let result = translate_batch(
+            pre_cxt,
+            batch,
+            pos_cxt,
+            ai_settings,
+            dst_language,
+            error_log,
+            Some(previous),
+        )
+        .await;
+
+        // translate_batch returns exactly one row per input row.
+        let row = result
+            .into_iter()
+            .next()
+            .expect("single-row batch yields exactly one result row");
+
+        // Merge: keep identity, adopt the new translation + metadata.
+        translated[i].text = row.text;
+        translated[i].remarks = row.remarks;
+        translated[i].confidence = row.confidence;
+        translated[i].needs_revision = row.needs_revision;
+    }
+
+    count
 }
 
 /// Send CSV file to AI for translating.
@@ -442,6 +556,29 @@ pub struct Args {
     /// If increasing this too much, consider raising batch-size instead.
     #[arg(long, default_value_t = 3)]
     pub pos_ctx: u16,
+
+    /// Total number of translation passes. Pass 1 translates everything; each
+    /// further pass re-translates only rows flagged `needs_revision` (or with
+    /// confidence below --confidence-threshold), with progressively wider
+    /// context. 1 (the default) behaves exactly like single-pass.
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..))]
+    pub max_passes: u8,
+
+    /// Extra context lines added on each side per revision pass. Pass k uses
+    /// --pre-ctx + (k-1)*step pre-context and --pos-ctx + (k-1)*step
+    /// post-context.
+    #[arg(long, default_value_t = 3)]
+    pub revision_ctx_step: u16,
+
+    /// Also re-translate rows whose confidence is below this threshold
+    /// (0.0-1.0), in addition to rows flagged `needs_revision`.
+    #[arg(long)]
+    pub confidence_threshold: Option<f64>,
+
+    /// Optional separate system prompt for revision passes. Defaults to
+    /// --system-prompt when omitted.
+    #[arg(long)]
+    pub revision_system_prompt: Option<String>,
 
     /// Path to JSON file to customize more options (like temperature, top_p, etc).
     #[arg(long, short)]
@@ -521,7 +658,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Translate to target lang.
         println!("Begin Translation");
-        let translated = translate_blender_lines(
+        let mut translated = translate_blender_lines(
             &lines,
             args.batch_size as usize,
             args.pre_ctx as usize,
@@ -531,6 +668,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &mut error_log,
         )
         .await?;
+
+        // Multipass: re-translate flagged rows (needs_revision or low
+        // confidence) with progressively wider context, attaching each row's
+        // previous attempt so the LLM can revise it. Stops early when a pass
+        // finds nothing left to flag.
+        if args.max_passes > 1 {
+            let revision_ai_settings = match &args.revision_system_prompt {
+                Some(path) => {
+                    println!("Opening Revision System Prompt {}", path);
+                    let mut revision_prompt = String::new();
+                    File::open(path)?.read_to_string(&mut revision_prompt)?;
+                    Some(open_ai::AiSettings {
+                        system_prompt: revision_prompt,
+                        ..ai_settings.clone()
+                    })
+                }
+                None => None,
+            };
+
+            let max = args.max_passes as usize;
+            for pass in 2..=max {
+                let settings = revision_ai_settings.as_ref().unwrap_or(&ai_settings);
+                let retranslated = revision_pass(
+                    &mut translated,
+                    &lines,
+                    args.pre_ctx as usize,
+                    args.pos_ctx as usize,
+                    args.revision_ctx_step as usize,
+                    pass,
+                    args.confidence_threshold,
+                    settings,
+                    &args.dst_lang,
+                    &mut error_log,
+                )
+                .await;
+                if retranslated == 0 {
+                    break;
+                }
+            }
+        }
 
         // Now translate it back to the original lang for validation (if src_lang was provided).
         let original_back = match args.src_lang {
@@ -699,7 +876,7 @@ mod tests {
         let pre = make_entries(1);
         let batch = make_entries(2);
         let pos = make_entries(1);
-        let json = build_translation_request(&pre, &batch, &pos, "English").unwrap();
+        let json = build_translation_request(&pre, &batch, &pos, "English", None).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["destination_language"], "English");
         assert_eq!(value["previous_context"].as_array().unwrap().len(), 1);
@@ -710,12 +887,71 @@ mod tests {
         assert_eq!(to_translate[1]["index"], 1);
         assert_eq!(to_translate[0]["speaker"], "Speaker 0");
         assert_eq!(to_translate[0]["text"], "original text 0");
+        // Pass 1 (no previous results) must not carry revision fields.
+        assert!(to_translate[0].get("previous_translation").is_none());
+        assert!(to_translate[0].get("previous_remarks").is_none());
+    }
+
+    #[test]
+    fn build_request_with_previous_translation() {
+        let batch = make_entries(1);
+        // Simulate a pass-1 result: translated text + remarks, aligned with batch.
+        let previous = vec![BlenderTextRow {
+            text: "World of Invoices".to_string(),
+            remarks: Some("ambiguous without context".to_string()),
+            ..BlenderTextRow::default()
+        }];
+        let json = build_translation_request(&[], &batch, &[], "English", Some(&previous)).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let entry = &value["text_to_translate"].as_array().unwrap()[0];
+        assert_eq!(entry["previous_translation"], "World of Invoices");
+        assert_eq!(entry["previous_remarks"], "ambiguous without context");
+    }
+
+    #[test]
+    fn build_request_previous_skips_empty_fields() {
+        let batch = make_entries(1);
+        // Fallback-style previous result: empty text and remarks must be omitted.
+        let previous = vec![BlenderTextRow {
+            text: String::new(),
+            remarks: None,
+            ..BlenderTextRow::default()
+        }];
+        let json = build_translation_request(&[], &batch, &[], "English", Some(&previous)).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let entry = &value["text_to_translate"].as_array().unwrap()[0];
+        assert!(entry.get("previous_translation").is_none());
+        assert!(entry.get("previous_remarks").is_none());
+    }
+
+    #[test]
+    fn is_flagged_needs_revision() {
+        let mut row = BlenderTextRow::default();
+        assert!(!is_flagged(&row, None));
+        row.needs_revision = Some(true);
+        assert!(is_flagged(&row, None));
+        row.needs_revision = Some(false);
+        assert!(!is_flagged(&row, None));
+    }
+
+    #[test]
+    fn is_flagged_confidence_threshold() {
+        let mut row = BlenderTextRow::default();
+        row.confidence = Some(0.5);
+        assert!(!is_flagged(&row, None));
+        assert!(!is_flagged(&row, Some(0.5)));
+        assert!(is_flagged(&row, Some(0.6)));
+        assert!(!is_flagged(&row, Some(0.4)));
+        // No confidence (e.g. fallback row without metadata) is not flagged
+        // by the threshold alone — needs_revision covers those.
+        let blank = BlenderTextRow::default();
+        assert!(!is_flagged(&blank, Some(0.9)));
     }
 
     #[test]
     fn build_request_empty_contexts() {
         let batch = make_entries(1);
-        let json = build_translation_request(&[], &batch, &[], "Spanish").unwrap();
+        let json = build_translation_request(&[], &batch, &[], "Spanish", None).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["previous_context"], serde_json::json!([]));
         assert_eq!(value["future_context"], serde_json::json!([]));

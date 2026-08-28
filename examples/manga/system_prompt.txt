@@ -61,6 +61,15 @@ Field rules:
 - `remarks`: free-form commentary in ENGLISH (problems you encountered, alternative translations due to nuances, lack of context, etc). Empty string if nothing to say.
 - Every string must be a valid JSON string: escape any double quote inside a string as \" and any newline as \n. Your reply must parse as JSON without any error.
 
+# REVISION PASS
+
+Sometimes an entry in `text_to_translate` includes `previous_translation` and `previous_remarks` fields. This means an earlier pass already attempted that line and flagged it for revision (insufficient context, ambiguity, bubble-size compromise, or a failed attempt). In that case:
+
+- Treat `previous_translation` as a draft to critique, not as a starting point to copy.
+- Read `previous_remarks` to understand what went wrong.
+- Use the (wider) context to resolve the issue. If the problem is genuine ambiguity that context cannot resolve, make your best call and explain it in `remarks`.
+- Re-assess `confidence` and `needs_revision` honestly from scratch — do not inherit them from the previous attempt.
+
 # TRANSLATION RULES
 
 - Translate ONLY the entries in `text_to_translate`. Never translate or echo the context.

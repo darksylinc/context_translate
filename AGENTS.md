@@ -45,7 +45,8 @@ context_translate/
 3. **Request Generation**: A JSON `TranslationRequest` is built (`previous_context`, `text_to_translate` with per-entry `index`, `future_context`, `destination_language`)
 4. **AI API Call**: JSON sent as the user message to local LLM (llama.cpp) or OpenAI-compatible endpoint, with `response_format: {"type": "json_object"}` to constrain output to valid JSON
 5. **Response Parsing**: The AI must reply with a JSON `TranslationResponse`; indices are validated as an exact permutation of the batch (order-independent, deterministic failure detection)
-6. **Output**: Translated CSV (or ODS, if in ODS mode) with optional back-translation for validation
+6. **Multipass (optional)**: Rows flagged `needs_revision` (or below `--confidence-threshold`) are re-translated by `revision_pass()` with progressively wider context and the previous attempt attached (`previous_translation`/`previous_remarks`), merged back in place
+7. **Output**: Translated CSV (or ODS, if in ODS mode) with optional back-translation for validation
 
 ---
 
@@ -70,7 +71,12 @@ struct BlenderTextRow {
 
 // LLM JSON protocol (CSV path only)
 struct LineItem { speaker: String, text: String }                  // context line
-struct IndexedLineItem { index: usize, speaker: String, text: String }
+struct IndexedLineItem {
+    index: usize, speaker: String, text: String,
+    // Multipass only: previous attempt (skipped when None)
+    previous_translation: Option<String>,
+    previous_remarks: Option<String>,
+}
 struct TranslationRequest<'a> {   // LLM input
     destination_language: &'a str,
     previous_context: Vec<LineItem>,
@@ -89,10 +95,12 @@ struct TranslationResponse { translations: Vec<TranslatedItem> }
 
 1. **`read_csv(path: &str)`** - Reads CSV with semicolon delimiter (`;`)
 2. **`write_csv(path, entries, original_back)`** - Writes translated CSV (includes `Confidence` / `Needs Revision` columns)
-3. **`build_translation_request(pre_cxt, to_translate, pos_cxt, dst_language)`** - Serializes the JSON `TranslationRequest` (M pre-context / N to-translate / O post-context lines)
-4. **`translate_batch(pre_cxt, batch, pos_cxt, ai_settings, dst_language, error_log)`** - Pure unit of work: build request → call LLM → parse/validate JSON (3 retries, then "AI ERROR. GIVEN UP." fallback rows flagged `needs_revision: true`). Multipass architectures reuse this directly.
-5. **`translate_blender_lines(lines, batch_size, pre_ctx, pos_ctx, ai_settings, dst_lang, error_log)`** - Batching loop over `translate_batch`
-6. **`process_ai_response(response, entries, orig_prompt, error_log)`** - Parses/validates the JSON response, logs failures to error log
+3. **`build_translation_request(pre_cxt, to_translate, pos_cxt, dst_language, previous)`** - Serializes the JSON `TranslationRequest` (M pre-context / N to-translate / O post-context lines). `previous` (multipass) aligns with `to_translate` and annotates entries with `previous_translation` / `previous_remarks`.
+4. **`translate_batch(pre_cxt, batch, pos_cxt, ai_settings, dst_language, error_log, previous)`** - Pure unit of work: build request → call LLM → parse/validate JSON (3 retries, then "AI ERROR. GIVEN UP." fallback rows flagged `needs_revision: true`). Revision passes reuse this directly.
+5. **`translate_blender_lines(lines, batch_size, pre_ctx, pos_ctx, ai_settings, dst_lang, error_log)`** - Batching loop over `translate_batch` (pass 1)
+6. **`is_flagged(row, confidence_threshold)`** - True when a row needs a revision pass (`needs_revision == true` or confidence below threshold)
+7. **`revision_pass(translated, source, base_pre_ctx, base_pos_ctx, ctx_step, pass_number, confidence_threshold, ai_settings, dst_language, error_log)`** - Re-translates flagged rows (N=1 each) with context from the ORIGINAL source rows and the previous attempt attached; merges results in place; returns the number of rows re-translated (0 → stop)
+8. **`process_ai_response(response, entries, orig_prompt, error_log)`** - Parses/validates the JSON response, logs failures to error log
 
 **Response Parsing Rules** (see `process_ai_response_impl`):
 - Strips markdown code fences if present; slices from first `{` to last `}` to tolerate prose
@@ -112,11 +120,13 @@ for i in (0..entries.len()).step_by(entries_per_query) {
 
     // translate_batch: build JSON request -> run_prompt -> parse JSON (3 retries)
     let translated = translate_batch(pre_cxt, &entries[from..to], pos_cxt,
-        ai_settings, dst_language, error_log).await;
+        ai_settings, dst_language, error_log, None).await;
     output.extend(translated);
 }
-// TODO(multipass): rows with needs_revision == true can be re-sent through
-// translate_batch with wider context and merged back by datablock_name.
+// Multipass (run() after pass 1): while --max-passes allows, revision_pass()
+// re-sends rows where is_flagged() is true, one N=1 batch each, with context
+// from the original source rows, base_ctx + (pass-1)*revision_ctx_step on
+// each side, and previous_translation/previous_remarks attached.
 ```
 
 ### `open_ai.rs` - API Communication
@@ -187,6 +197,10 @@ struct LangSet {
 | `--batch-size` |   | Lines per batch (default: 20) |
 | `--pre-ctx` |   | Preceding context lines (default: 3) |
 | `--pos-ctx` |   | Following context lines (default: 3) |
+| `--max-passes` |   | Total translation passes; extra passes re-translate only flagged rows (default: 1) |
+| `--revision-ctx-step` |   | Extra context lines per side added each revision pass (default: 3) |
+| `--confidence-threshold` |   | Also re-translate rows with confidence below this (0.0–1.0) |
+| `--revision-system-prompt` |   | Separate system prompt for revision passes (defaults to `--system-prompt`) |
 | `--src-lang` |   | Source language (enables back-translation) |
 | `--timeout-secs` |   | Request timeout in seconds |
 | `--llm-options` |   | JSON file with extra LLM options |
@@ -227,6 +241,7 @@ Two example system prompts are provided, each tailored for different use cases:
   - Echo each entry's `index`; provide `confidence` (0.0–1.0), `needs_revision` (bool), `remarks` (English)
   - Preserve newlines / per-line length for speech bubbles; never translate speaker names
   - `needs_revision: true` when context is insufficient or the line is genuinely ambiguous (multipass hook)
+  - Revision passes: entries may carry `previous_translation` / `previous_remarks` — critique the draft, use the wider context, re-assess metadata from scratch
 
 ### ODS Mode (`examples/ods/system_prompt.txt`)
 - **Persona**: Neutral, no remarks/commentary
@@ -380,7 +395,7 @@ From README.md:
 
 ### Unit Tests
 
-`cargo test` runs the JSON protocol tests in `src/main.rs` (`mod tests`): clean/fenced/preamble JSON, reordered indices, and the failure cases (missing/duplicate/out-of-range index, wrong count, non-JSON).
+`cargo test` runs the JSON protocol tests in `src/main.rs` (`mod tests`): clean/fenced/preamble JSON, reordered indices, the failure cases (missing/duplicate/out-of-range index, wrong count, non-JSON), request serialization with/without `previous_translation`/`previous_remarks` (multipass), and `is_flagged` (needs_revision / confidence threshold).
 
 ### Test Setup
 

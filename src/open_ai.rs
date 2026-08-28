@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error;
 
+#[derive(Clone)]
 pub struct AiSettings<'a> {
     pub endpoint: String,
     pub api_key: String,
