@@ -219,8 +219,7 @@ struct LangSet {
 
 Two example system prompts are provided, each tailored for different use cases:
 
-### Manga Mode (`examples/manga/system_prompt.txt`)
-- **Persona**: "Elara", conversational yet professional
+### CSV Mode (`examples/manga/system_prompt.txt`)
 - **Protocol**: JSON in / JSON out (see `main.rs` protocol structs)
 - **Key Requirements**:
   - Translate only `text_to_translate`; context is reference-only
