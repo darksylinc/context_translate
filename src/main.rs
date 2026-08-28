@@ -1,7 +1,7 @@
-use clap::{Parser, command};
+use clap::Parser;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{env, fmt::Write, fs::File, io::Read, io::Write as OtherWrite};
+use std::{env, fs::File, io::Read, io::Write as OtherWrite};
 
 use crate::error::Error;
 
@@ -22,6 +22,66 @@ struct BlenderTextRow {
     original_back: Option<String>,
     #[serde(rename = "Remarks")]
     remarks: Option<String>,
+    #[serde(rename = "Confidence", default)]
+    confidence: Option<f64>,
+    #[serde(rename = "Needs Revision", default)]
+    needs_revision: Option<bool>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LLM JSON protocol
+//
+// The user message sent to the LLM is a pure JSON object (TranslationRequest)
+// and the LLM must reply with a pure JSON object (TranslationResponse).
+// This replaces the old brittle {SPK} / {RMK} free-text tagging.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A single dialogue line (speaker + text) used for context.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LineItem {
+    speaker: String,
+    text: String,
+}
+
+/// A line to be translated. Carries an `index` which the LLM must echo back
+/// in its response, so entries can be matched deterministically regardless of
+/// the order the LLM returns them in.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IndexedLineItem {
+    index: usize,
+    speaker: String,
+    text: String,
+}
+
+/// LLM input: M lines of previous context, N lines to translate, O lines of
+/// future context. M/N/O are user-adjustable via --pre-ctx/--batch-size/--pos-ctx.
+#[derive(Debug, Serialize)]
+struct TranslationRequest<'a> {
+    destination_language: &'a str,
+    previous_context: Vec<LineItem>,
+    text_to_translate: Vec<IndexedLineItem>,
+    future_context: Vec<LineItem>,
+}
+
+/// One translated entry as returned by the LLM.
+#[derive(Debug, Clone, Deserialize)]
+struct TranslatedItem {
+    index: usize,
+    text: String,
+    /// LLM self-assessed confidence in the translation, 0.0..=1.0.
+    confidence: f64,
+    /// Multipass hook: true when the LLM wants a second look (insufficient
+    /// context, genuine ambiguity, etc).
+    needs_revision: bool,
+    /// Free-form commentary, in English.
+    #[serde(default)]
+    remarks: String,
+}
+
+/// LLM output: only the translated entries from `text_to_translate`.
+#[derive(Debug, Deserialize)]
+struct TranslationResponse {
+    translations: Vec<TranslatedItem>,
 }
 
 fn read_csv(path: &str) -> Result<Vec<BlenderTextRow>, csv::Error> {
@@ -53,43 +113,48 @@ fn write_csv(
             original: entry.original,
             original_back: Some(back.text),
             remarks: entry.remarks,
+            confidence: entry.confidence,
+            needs_revision: entry.needs_revision,
         };
         wr.serialize(row)?;
     }
     Ok(())
 }
 
-fn generate_blender_prompt(
+fn build_translation_request(
     pre_cxt: &[BlenderTextRow],
     to_translate: &[BlenderTextRow],
     pos_cxt: &[BlenderTextRow],
     dst_language: &str,
-) -> String {
-    let mut prompt = String::new();
+) -> Result<String, serde_json::Error> {
+    let request = TranslationRequest {
+        destination_language: dst_language,
+        previous_context: pre_cxt
+            .iter()
+            .map(|l| LineItem {
+                speaker: l.speaker.clone(),
+                text: l.text.clone(),
+            })
+            .collect(),
+        text_to_translate: to_translate
+            .iter()
+            .enumerate()
+            .map(|(i, l)| IndexedLineItem {
+                index: i,
+                speaker: l.speaker.clone(),
+                text: l.text.clone(),
+            })
+            .collect(),
+        future_context: pos_cxt
+            .iter()
+            .map(|l| LineItem {
+                speaker: l.speaker.clone(),
+                text: l.text.clone(),
+            })
+            .collect(),
+    };
 
-    writeln!(prompt, "Translate to {}", dst_language).unwrap();
-    writeln!(prompt, "# CONTEXT PREVIOUS BEGIN").unwrap();
-    for line in pre_cxt {
-        writeln!(prompt, "## {}", line.speaker).unwrap();
-        writeln!(prompt, "{}", line.text).unwrap();
-    }
-    writeln!(prompt, "# CONTEXT PREVIOUS END").unwrap();
-
-    writeln!(prompt, "# TEXT BEGIN").unwrap();
-    for line in to_translate {
-        writeln!(prompt, "{{SPK}}{}{{SPK}}", line.speaker).unwrap();
-        writeln!(prompt, "{}", line.text).unwrap();
-    }
-    writeln!(prompt, "# TEXT END").unwrap();
-
-    writeln!(prompt, "# CONTEXT AFTER BEGIN").unwrap();
-    for line in pos_cxt {
-        writeln!(prompt, "## {}", line.speaker).unwrap();
-        writeln!(prompt, "{}", line.text).unwrap();
-    }
-    writeln!(prompt, "# CONTEXT AFTER END").unwrap();
-
-    prompt
+    serde_json::to_string(&request)
 }
 
 fn process_ai_response(
@@ -116,63 +181,171 @@ fn process_ai_response(
 }
 
 fn process_ai_response_impl(
-    response: &String,
+    response: &str,
     entries: &[BlenderTextRow],
 ) -> Result<Vec<BlenderTextRow>, Error> {
-    if response.is_empty() {
-        return Err(error::Error::InvalidTranslation);
+    if response.trim().is_empty() {
+        return Err(Error::InvalidResponse("empty response".to_string()));
     }
 
-    // We can't use response.len() - 1 for out-of-bounds check because that may not be a char boundary.
-    // Find the last character.
-    let last_char_start = response.char_indices().last().unwrap_or((0, 'A')).0;
+    // LLMs sometimes wrap the JSON in markdown code fences; strip them.
+    let mut text = response.trim();
+    if let Some(stripped) = text.strip_prefix("```") {
+        let after_fence = stripped
+            .split_once('\n')
+            .map(|(_, rest)| rest)
+            .unwrap_or("");
+        if let Some(end) = after_fence.rfind("```") {
+            text = after_fence[..end].trim();
+        }
+    }
+
+    // Tolerate preamble/postamble prose: slice from the first '{' to the last '}'.
+    let start = text
+        .find('{')
+        .ok_or_else(|| Error::InvalidResponse("no JSON object found in response".to_string()))?;
+    let end = text
+        .rfind('}')
+        .ok_or_else(|| Error::InvalidResponse("no JSON object found in response".to_string()))?;
+    if end <= start {
+        return Err(Error::InvalidResponse(
+            "malformed JSON object in response".to_string(),
+        ));
+    }
+    let json = &text[start..=end];
+
+    let parsed: TranslationResponse = serde_json::from_str(json)
+        .map_err(|e| Error::InvalidResponse(format!("JSON parse error: {e}")))?;
+
+    if parsed.translations.len() != entries.len() {
+        return Err(Error::InvalidResponse(format!(
+            "expected {} translations, got {}",
+            entries.len(),
+            parsed.translations.len()
+        )));
+    }
+
+    // Validate that the echoed indices form an exact permutation of 0..entries.len().
+    // This makes parsing order-independent and deterministically detects
+    // missing, duplicated or out-of-range entries.
+    let mut seen = vec![false; entries.len()];
+    for item in &parsed.translations {
+        if item.index >= entries.len() {
+            return Err(Error::InvalidResponse(format!(
+                "index {} out of range ({} entries)",
+                item.index,
+                entries.len()
+            )));
+        }
+        if seen[item.index] {
+            return Err(Error::InvalidResponse(format!(
+                "duplicate index {}",
+                item.index
+            )));
+        }
+        seen[item.index] = true;
+    }
+    if !seen.iter().all(|s| *s) {
+        let missing: Vec<usize> = seen
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| !**s)
+            .map(|(i, _)| i)
+            .collect();
+        return Err(Error::InvalidResponse(format!(
+            "missing indices: {missing:?}"
+        )));
+    }
+
+    // Map back to input order.
+    let mut by_index = vec![None; entries.len()];
+    for item in parsed.translations {
+        let idx = item.index;
+        by_index[idx] = Some(item);
+    }
 
     let mut translated = Vec::with_capacity(entries.len());
-
-    let mut start_idx = 0;
-    for entry in entries {
-        if start_idx >= response.len() {
-            // In previous iteration we reached the end but we were expecting more entries.
-            return Err(error::Error::InvalidTranslation);
-        }
-
-        let speaker_pattern = format!("{{SPK}}{}{{SPK}}", entry.speaker);
-        let haystack = response[start_idx..]
-            .find(&speaker_pattern)
-            .ok_or(error::Error::InvalidTranslation)?;
-        start_idx = std::cmp::min(
-            start_idx + haystack + speaker_pattern.len(),
-            last_char_start,
-        );
-        let end_idx = match response[start_idx..].find("{SPK}") {
-            Some(idx) => start_idx + idx,
-            None => match response[start_idx..].find("```") {
-                Some(idx) => start_idx + idx,
-                None => response.len(),
-            },
+    for (entry, item) in entries.iter().zip(by_index.into_iter()) {
+        let Some(item) = item else {
+            unreachable!("index permutation validated above");
         };
-
-        let parts = response[start_idx..end_idx]
-            .split_once("{RMK}")
-            .unwrap_or((&response[start_idx..end_idx], ""));
-        let text = parts.0.trim_start().trim_end();
-        let remarks = parts.1.trim_start().trim_end();
-
         translated.push(BlenderTextRow {
             datablock_name: entry.datablock_name.clone(),
             speaker: entry.speaker.clone(),
-            text: text.to_string(),
+            text: item.text,
             original: Some(entry.text.clone()),
             original_back: None,
-            remarks: Some(remarks.to_string()),
+            remarks: Some(item.remarks),
+            confidence: Some(item.confidence),
+            needs_revision: Some(item.needs_revision),
         });
-
-        start_idx = end_idx
     }
 
     Ok(translated)
 }
 
+/// Translate a single batch (N lines) surrounded by context (M pre / O post lines).
+///
+/// This is the pure unit of work: it builds the JSON request, calls the LLM,
+/// and parses/validates the JSON response. Multipass architectures can reuse
+/// this directly by rebuilding requests with different context or parameters
+/// for entries flagged `needs_revision`.
+async fn translate_batch(
+    pre_cxt: &[BlenderTextRow],
+    batch: &[BlenderTextRow],
+    pos_cxt: &[BlenderTextRow],
+    ai_settings: &open_ai::AiSettings<'_>,
+    dst_language: &str,
+    error_log: &mut File,
+) -> Vec<BlenderTextRow> {
+    let request = build_translation_request(pre_cxt, batch, pos_cxt, dst_language)
+        .expect("serializing our own TranslationRequest cannot fail");
+
+    let num_retries = 3;
+
+    let mut response = open_ai::run_prompt(ai_settings, &request)
+        .await
+        .expect("AI request failed");
+
+    for j in 0..num_retries {
+        match process_ai_response(&response, batch, &request, error_log) {
+            Ok(translated) => return translated,
+            Err(e) => {
+                if j + 1 == num_retries {
+                    eprintln!(
+                        "Invalid Translation Output. Attempt {}. Giving up: {e}",
+                        j + 1
+                    );
+                    return batch
+                        .iter()
+                        .map(|entry| BlenderTextRow {
+                            datablock_name: entry.datablock_name.clone(),
+                            speaker: entry.speaker.clone(),
+                            text: String::new(),
+                            original: Some(entry.text.clone()),
+                            original_back: None,
+                            remarks: Some("AI ERROR. GIVEN UP.".to_string()),
+                            confidence: None,
+                            needs_revision: Some(true),
+                        })
+                        .collect();
+                }
+                eprintln!(
+                    "Invalid Translation Output. Attempt {}. Retrying...: {e}",
+                    j + 1
+                );
+                response = open_ai::run_prompt(ai_settings, &request)
+                    .await
+                    .expect("AI request failed");
+            }
+        }
+    }
+
+    unreachable!("retry loop always returns")
+}
+
+/// Translate all lines, splitting them into batches of `entries_per_query`
+/// with `pre_context_lines` / `pos_context_lines` of surrounding context.
 async fn translate_blender_lines(
     entries: &Vec<BlenderTextRow>,
     entries_per_query: usize,
@@ -190,52 +363,29 @@ async fn translate_blender_lines(
         let from = i;
         let to = std::cmp::min(i + entries_per_query, entries.len());
 
-        let entries_to_translate = &entries[from..to];
-
         let pre_from = from.saturating_sub(pre_context_lines);
         let pre_cxt = &entries[pre_from..from];
 
         let pos_to = std::cmp::min(to + pos_context_lines, entries.len());
         let pos_cxt = &entries[to..pos_to];
 
-        let prompt = generate_blender_prompt(pre_cxt, entries_to_translate, pos_cxt, dst_language);
+        let translated = translate_batch(
+            pre_cxt,
+            &entries[from..to],
+            pos_cxt,
+            ai_settings,
+            dst_language,
+            error_log,
+        )
+        .await;
 
-        let mut response = open_ai::run_prompt(ai_settings, &prompt).await?;
-
-        let num_retries = 9;
-
-        let mut translated = {
-            let mut translated_result = Vec::new();
-            for j in 0..num_retries {
-                let translated =
-                    process_ai_response(&response, entries_to_translate, &prompt, error_log);
-                match translated {
-                    Ok(t) => translated_result = t,
-                    Err(_) => {
-                        if j + 1 == num_retries {
-                            eprintln!("Invalid Translation Output. Attempt {}. Giving up.", j);
-                            for entry in entries_to_translate {
-                                translated_result.push(BlenderTextRow {
-                                    datablock_name: entry.datablock_name.clone(),
-                                    speaker: entry.speaker.clone(),
-                                    text: "".to_string(),
-                                    original: Some(entry.text.clone()),
-                                    original_back: None,
-                                    remarks: Some("AI ERROR. GIVEN UP.".to_string()),
-                                });
-                            }
-                        } else {
-                            eprintln!("Invalid Translation Output. Attempt {}. Retrying...", j);
-                            response = open_ai::run_prompt(ai_settings, &prompt).await?;
-                        }
-                    }
-                }
-            }
-            translated_result
-        };
-
-        output.append(&mut translated);
+        output.extend(translated);
     }
+
+    // TODO(multipass): rows carrying needs_revision == true can be collected
+    // here and re-sent through translate_batch with wider context (larger
+    // pre/pos context, lower temperature, or a dedicated revision system
+    // prompt), then merged back by datablock_name.
 
     Ok(output)
 }
@@ -255,7 +405,7 @@ pub struct Args {
     /// OpenAI API key. You can also set the OPENAI_API_KEY environment variable. Cmd line is higher priority.
     #[arg(short, long)]
     pub api_key: Option<String>,
-    /// LLM Model to use. e.g. "mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf"
+    /// LLM Model to use. e.g. "Qwen3.8-27B-UD-Q4_K_XL.gguf" / "Qwen3.5-35B-A3B-UD-Q4_K_L.gguf"
     #[arg(short, long)]
     pub model: String,
 
@@ -340,6 +490,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => None,
     };
 
+    // The CSV path speaks pure JSON in and out, so ask the provider to
+    // constrain the output to valid JSON (grammar-constrained decoding).
+    // The ODS path uses a free-text protocol and must stay unconstrained.
+    let json_response_format = if args.ods_key_mode_columns.is_empty() {
+        Some(serde_json::json!({ "type": "json_object" }))
+    } else {
+        None
+    };
+
     let ai_settings = open_ai::AiSettings {
         endpoint: args.endpoint.clone(),
         api_key: api_key,
@@ -350,6 +509,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(extra_options) => Some(extra_options.as_object().unwrap()),
             None => None,
         },
+        response_format: json_response_format.as_ref(),
         debug: args.debug,
     };
 
@@ -414,4 +574,150 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_entries(n: usize) -> Vec<BlenderTextRow> {
+        (0..n)
+            .map(|i| BlenderTextRow {
+                datablock_name: format!("key_{i}"),
+                speaker: format!("Speaker {i}"),
+                text: format!("original text {i}"),
+                original: None,
+                original_back: None,
+                remarks: None,
+                confidence: None,
+                needs_revision: None,
+            })
+            .collect()
+    }
+
+    fn item(index: usize, text: &str) -> String {
+        format!(
+            "{{\"index\": {}, \"text\": \"{}\", \"confidence\": 0.9, \"needs_revision\": false, \"remarks\": \"\"}}",
+            index, text
+        )
+    }
+
+    #[test]
+    fn parse_clean_json() {
+        let entries = make_entries(2);
+        let response = format!(
+            "{{\"translations\": [{}, {}]}}",
+            item(0, "World of Pastries"),
+            item(1, "We searched every bakery in Argentina")
+        );
+        let result = process_ai_response_impl(&response, &entries).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].text, "World of Pastries");
+        assert_eq!(result[0].datablock_name, "key_0");
+        assert_eq!(result[0].original.as_deref(), Some("original text 0"));
+        assert_eq!(result[0].confidence, Some(0.9));
+        assert_eq!(result[0].needs_revision, Some(false));
+        assert_eq!(result[1].text, "We searched every bakery in Argentina");
+    }
+
+    #[test]
+    fn parse_json_in_markdown_fence() {
+        let entries = make_entries(1);
+        let response = format!(
+            "```json\n{{\"translations\": [{}]}}\n```",
+            item(0, "translated")
+        );
+        let result = process_ai_response_impl(&response, &entries).unwrap();
+        assert_eq!(result[0].text, "translated");
+    }
+
+    #[test]
+    fn parse_json_with_preamble() {
+        let entries = make_entries(1);
+        let response = format!(
+            "Here is the translation you requested:\n{{\"translations\": [{}]}}\nHope that helps!",
+            item(0, "translated")
+        );
+        let result = process_ai_response_impl(&response, &entries).unwrap();
+        assert_eq!(result[0].text, "translated");
+    }
+
+    #[test]
+    fn parse_reordered_indices() {
+        let entries = make_entries(2);
+        // LLM returned index 1 before index 0 — must still map back to input order.
+        let response = format!(
+            "{{\"translations\": [{}, {}]}}",
+            item(1, "second"),
+            item(0, "first")
+        );
+        let result = process_ai_response_impl(&response, &entries).unwrap();
+        assert_eq!(result[0].text, "first");
+        assert_eq!(result[0].datablock_name, "key_0");
+        assert_eq!(result[1].text, "second");
+        assert_eq!(result[1].datablock_name, "key_1");
+    }
+
+    #[test]
+    fn parse_missing_index_fails() {
+        let entries = make_entries(2);
+        let response = format!("{{\"translations\": [{}]}}", item(0, "only one"));
+        assert!(process_ai_response_impl(&response, &entries).is_err());
+    }
+
+    #[test]
+    fn parse_duplicate_index_fails() {
+        let entries = make_entries(2);
+        let response = format!("{{\"translations\": [{}, {}]}}", item(0, "a"), item(0, "b"));
+        assert!(process_ai_response_impl(&response, &entries).is_err());
+    }
+
+    #[test]
+    fn parse_out_of_range_index_fails() {
+        let entries = make_entries(2);
+        let response = format!("{{\"translations\": [{}, {}]}}", item(0, "a"), item(5, "b"));
+        assert!(process_ai_response_impl(&response, &entries).is_err());
+    }
+
+    #[test]
+    fn parse_wrong_count_fails() {
+        let entries = make_entries(2);
+        let response = format!("{{\"translations\": [{}]}}", item(0, "a"));
+        assert!(process_ai_response_impl(&response, &entries).is_err());
+    }
+
+    #[test]
+    fn parse_not_json_fails() {
+        let entries = make_entries(1);
+        assert!(process_ai_response_impl("I refuse to answer.", &entries).is_err());
+        assert!(process_ai_response_impl("", &entries).is_err());
+        assert!(process_ai_response_impl("   \n  ", &entries).is_err());
+    }
+
+    #[test]
+    fn build_request_json_shape() {
+        let pre = make_entries(1);
+        let batch = make_entries(2);
+        let pos = make_entries(1);
+        let json = build_translation_request(&pre, &batch, &pos, "English").unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["destination_language"], "English");
+        assert_eq!(value["previous_context"].as_array().unwrap().len(), 1);
+        assert_eq!(value["text_to_translate"].as_array().unwrap().len(), 2);
+        assert_eq!(value["future_context"].as_array().unwrap().len(), 1);
+        let to_translate = value["text_to_translate"].as_array().unwrap();
+        assert_eq!(to_translate[0]["index"], 0);
+        assert_eq!(to_translate[1]["index"], 1);
+        assert_eq!(to_translate[0]["speaker"], "Speaker 0");
+        assert_eq!(to_translate[0]["text"], "original text 0");
+    }
+
+    #[test]
+    fn build_request_empty_contexts() {
+        let batch = make_entries(1);
+        let json = build_translation_request(&[], &batch, &[], "Spanish").unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["previous_context"], serde_json::json!([]));
+        assert_eq!(value["future_context"], serde_json::json!([]));
+    }
 }

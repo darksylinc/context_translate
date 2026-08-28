@@ -67,7 +67,7 @@ This tool was mostly tested against llama.cpp running Mistral 3.1 24B which is e
 This is how I launch llama.cpp on an AMD Radeon 6800 XT:
 
 ```bash
-llama-server -m mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf -ngl 99 --ctx-size 10144 --jinja --temp 0.95 --port 8081 --api-key API_KEY -fa --swa-full --cache-reuse 64 -ub 2048 -b 2048 -np 1 --mlock --log-colors --no-webui --metrics -ctk q4_0 -ctv q4_0 -dev Vulkan0
+llama-server -m Qwen3.5-35B-A3B-UD-Q4_K_L.gguf.gguf -ngl 99 --ctx-size 10144 --jinja --temp 0.95 --port 8081 --api-key API_KEY -fa --swa-full --cache-reuse 64 -ub 2048 -b 2048 -np 1 --mlock --log-colors --no-webui --metrics -ctk q4_0 -ctv q4_0 -dev Vulkan0
 ```
 
 And then run this tool:
@@ -75,7 +75,7 @@ And then run this tool:
 ```bash
 ./context_translate \
 	--src-lang English --dst-lang Spanish \
-	--api-key API_KEY -m mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf \
+	--api-key API_KEY -m Qwen3.5-35B-A3B-UD-Q4_K_L.gguf.gguf \
 	--src-csv "input.csv" \
 	--dst-csv "output.csv" \
 	--system-prompt examples/manga/system_prompt.txt \

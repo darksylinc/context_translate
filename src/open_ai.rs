@@ -12,6 +12,9 @@ pub struct AiSettings<'a> {
     pub model: String,
     pub timeout_secs: u64,
     pub extra_options: Option<&'a serde_json::Map<String, serde_json::Value>>,
+    /// Optional `response_format` constraint sent to the provider, e.g.
+    /// `{"type": "json_object"}` to force grammar-constrained valid JSON.
+    pub response_format: Option<&'a serde_json::Value>,
     pub debug: bool,
 }
 
@@ -82,17 +85,17 @@ pub async fn run_prompt(
     };
 
     let request_body = {
-        match ai_data.extra_options {
-            Some(extra_opts) => {
-                let mut merged = serde_json::to_value(&request_body).unwrap();
-                let obj = merged.as_object_mut().unwrap();
-                for (k, v) in extra_opts {
-                    obj.insert(k.clone(), v.clone());
-                }
-                merged
-            }
-            None => serde_json::to_value(&request_body).unwrap(),
+        let mut merged = serde_json::to_value(&request_body).unwrap();
+        let obj = merged.as_object_mut().unwrap();
+        if let Some(fmt) = ai_data.response_format {
+            obj.insert("response_format".to_string(), fmt.clone());
         }
+        if let Some(extra_opts) = ai_data.extra_options {
+            for (k, v) in extra_opts {
+                obj.insert(k.clone(), v.clone());
+            }
+        }
+        merged
     };
 
     // println!("JSON:\n{}", request_body);
