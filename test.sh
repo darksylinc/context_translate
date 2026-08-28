@@ -12,6 +12,7 @@ pushd target/debug
 	--timeout-secs 120 \
 	--llm-options /home/matias/Projects/context_translate/examples/ods/options.json \
 	--api-key AAAAAA \
+	--max-passes 3 \
 	--pre-ctx 3 \
 	--batch-size 20 \
 	--pos-ctx 3 \
