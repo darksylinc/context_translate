@@ -1,3 +1,4 @@
 /target
 /examples/personal
 *.pyc
+.vscode
